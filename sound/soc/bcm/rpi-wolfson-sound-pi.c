@@ -217,9 +217,6 @@ const struct snd_soc_dapm_widget rpi_wsp_dapm_widgets[] = {
 	SND_SOC_DAPM_MIC("DMIC", NULL),
 	SND_SOC_DAPM_MIC("Headset Mic", NULL),
 	SND_SOC_DAPM_MIC("Line Input", NULL),
-	/* Create widgets for SPDIF output and input */
-	SND_SOC_DAPM_OUTPUT("SPDIF out"),
-	SND_SOC_DAPM_INPUT("SPDIF in"),
 };
 
 const struct snd_soc_dapm_route rpi_wsp_dapm_routes[] = {
@@ -235,8 +232,6 @@ const struct snd_soc_dapm_route rpi_wsp_dapm_routes[] = {
 	{ "IN3R", NULL, "Line Input" },
 	{ "Line Input", NULL, "MICBIAS3" },
 
-	{ "SPDIF out", NULL, "Playback" },
-	{ "Capture", NULL, "SPDIF in" },
 	{ "SYSCLK", NULL, "OPCLK" },
 	{ "ASYNCCLK", NULL, "ASYNCOPCLK" },
 };

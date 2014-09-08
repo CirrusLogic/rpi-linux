@@ -27,6 +27,7 @@
 #include <sound/soc.h>
 #include <sound/initval.h>
 #include <sound/tlv.h>
+#include <sound/soc-dapm.h>
 
 #include "wm8804.h"
 
@@ -72,6 +73,9 @@ static int txsrc_get(struct snd_kcontrol *kcontrol,
 static int txsrc_put(struct snd_kcontrol *kcontrol,
 		     struct snd_ctl_elem_value *ucontrol);
 
+int wm8804_aif_event(struct snd_soc_dapm_widget *w,
+		     struct snd_kcontrol *kcontrol, int event);
+
 /*
  * We can't use the same notifier block for more than one supply and
  * there's no way I can see to get from a callback to the caller
@@ -93,13 +97,69 @@ WM8804_REGULATOR_EVENT(0)
 WM8804_REGULATOR_EVENT(1)
 
 static const char *txsrc_text[] = { "S/PDIF RX", "AIF" };
-static const SOC_ENUM_SINGLE_EXT_DECL(txsrc, txsrc_text);
+static const SOC_ENUM_SINGLE_DECL(txsrc, WM8804_SPDTX4, 0x6, txsrc_text);
 
-static const struct snd_kcontrol_new wm8804_snd_controls[] = {
-	SOC_ENUM_EXT("Input Source", txsrc, txsrc_get, txsrc_put),
-	SOC_SINGLE("TX Playback Switch", WM8804_PWRDN, 2, 1, 1),
-	SOC_SINGLE("AIF Playback Switch", WM8804_PWRDN, 4, 1, 1)
+static const struct snd_kcontrol_new wm8804_tx_source_mux[] = {
+	SOC_DAPM_ENUM_EXT("Tx Source", txsrc, txsrc_get, txsrc_put),
 };
+
+static const struct snd_soc_dapm_widget wm8804_dapm_widgets[] = {
+
+SND_SOC_DAPM_OUTPUT("SPDIF out"),
+SND_SOC_DAPM_INPUT("SPDIF in"),
+
+SND_SOC_DAPM_PGA("SPDIFTX", WM8804_PWRDN, 2, 1,
+			NULL, 0),
+SND_SOC_DAPM_PGA("SPDIFRX", WM8804_PWRDN, 1, 1,
+			NULL, 0),
+
+SND_SOC_DAPM_MUX("Tx Source", SND_SOC_NOPM,
+			0x6, 0,wm8804_tx_source_mux),
+
+SND_SOC_DAPM_AIF_OUT_E("AIFTX", NULL, 0, SND_SOC_NOPM, 0x2, 1,
+			wm8804_aif_event,
+			SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
+SND_SOC_DAPM_AIF_IN_E("AIFRX", NULL, 0, SND_SOC_NOPM, 0x1, 1,
+			wm8804_aif_event,
+			SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
+};
+
+static const struct snd_soc_dapm_route wm8804_dapm_routes[] = {
+	{ "AIFRX", NULL, "Playback" },
+	{ "Tx Source", "AIF", "AIFRX" },
+
+	{ "SPDIFRX", NULL, "SPDIF in" },
+	{ "Tx Source", "S/PDIF RX", "SPDIFRX" },
+
+	{ "SPDIFTX", NULL, "Tx Source" },
+	{ "SPDIF out", NULL, "SPDIFTX" },
+
+	{ "AIFTX", NULL, "SPDIFRX" },
+	{ "Capture", NULL, "AIFTX" },
+};
+
+int wm8804_aif_event(struct snd_soc_dapm_widget *w,
+		     struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_codec *codec = w->codec;
+	unsigned int txrxpwr;
+
+	switch (event) {
+	case SND_SOC_DAPM_POST_PMU:
+		/* power up the aif */
+		snd_soc_update_bits(codec, WM8804_PWRDN, 0x10, 0x0);
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		/* get the current power state */
+		txrxpwr = snd_soc_read(codec, WM8804_PWRDN) & (1<<w->shift);
+		// power down only when other path is not enabled.
+		if (txrxpwr >> w->shift)
+			snd_soc_update_bits(codec, WM8804_PWRDN, 0x10, 0x10);
+		break;
+	}
+
+	return 0;
+}
 
 static int txsrc_get(struct snd_kcontrol *kcontrol,
 		     struct snd_ctl_elem_value *ucontrol)
@@ -107,7 +167,7 @@ static int txsrc_get(struct snd_kcontrol *kcontrol,
 	struct snd_soc_codec *codec;
 	unsigned int src;
 
-	codec = snd_kcontrol_chip(kcontrol);
+	codec = snd_soc_dapm_kcontrol_codec(kcontrol);
 	src = snd_soc_read(codec, WM8804_SPDTX4);
 	if (src & 0x40)
 		ucontrol->value.integer.value[0] = 1;
@@ -121,47 +181,40 @@ static int txsrc_put(struct snd_kcontrol *kcontrol,
 		     struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_codec *codec;
-	unsigned int src, txpwr;
+	unsigned int txpwr;
+	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+	unsigned int change, mask, val;
 
-	codec = snd_kcontrol_chip(kcontrol);
+	codec = snd_soc_dapm_kcontrol_codec(kcontrol);
 
-	if (ucontrol->value.integer.value[0] != 0
-			&& ucontrol->value.integer.value[0] != 1)
+	if (ucontrol->value.enumerated.item[0] > (e->max - 1))
 		return -EINVAL;
 
-	src = snd_soc_read(codec, WM8804_SPDTX4);
-	switch ((src & 0x40) >> 6) {
-	case 0:
-		if (!ucontrol->value.integer.value[0])
-			return 0;
-		break;
-	case 1:
-		if (ucontrol->value.integer.value[1])
-			return 0;
-		break;
+	mutex_lock(&codec->card->dapm_mutex);
+
+	val = ucontrol->value.enumerated.item[0] << e->shift_l;
+	mask = 1 << e->shift_l;
+	change = snd_soc_test_bits(codec, e->reg, mask, val);
+
+	if(change)
+	{
+		/* save the current power state of the transmitter */
+		txpwr = snd_soc_read(codec, WM8804_PWRDN) & 0x4;
+
+		/* power down the transmitter */
+		snd_soc_update_bits(codec, WM8804_PWRDN, 0x4, 0x4);
+
+		mutex_unlock(&codec->card->dapm_mutex);
+
+		snd_soc_dapm_put_enum_double(kcontrol, ucontrol);
+
+		mutex_lock(&codec->card->dapm_mutex);
+
+		/* restore the transmitter's configuration */
+		snd_soc_update_bits(codec, WM8804_PWRDN, 0x4, txpwr);
 	}
 
-	/* save the current power state of the transmitter */
-	txpwr = snd_soc_read(codec, WM8804_PWRDN) & 0x4;
-	/* power down the transmitter */
-	snd_soc_update_bits(codec, WM8804_PWRDN, 0x4, 0x4);
-	/* set the tx source */
-	snd_soc_update_bits(codec, WM8804_SPDTX4, 0x40,
-			    ucontrol->value.integer.value[0] << 6);
-
-	if (ucontrol->value.integer.value[0]) {
-		/* power down the receiver */
-		snd_soc_update_bits(codec, WM8804_PWRDN, 0x2, 0x2);
-		/* power up the AIF */
-		snd_soc_update_bits(codec, WM8804_PWRDN, 0x10, 0);
-	} else {
-		/* don't power down the AIF -- may be used as an output */
-		/* power up the receiver */
-		snd_soc_update_bits(codec, WM8804_PWRDN, 0x2, 0);
-	}
-
-	/* restore the transmitter's configuration */
-	snd_soc_update_bits(codec, WM8804_PWRDN, 0x4, txpwr);
+	mutex_unlock(&codec->card->dapm_mutex);
 
 	return 0;
 }
@@ -687,8 +740,10 @@ static struct snd_soc_codec_driver soc_codec_dev_wm8804 = {
 	.set_bias_level = wm8804_set_bias_level,
 	.idle_bias_off = false,
 
-	.controls = wm8804_snd_controls,
-	.num_controls = ARRAY_SIZE(wm8804_snd_controls),
+	.dapm_widgets = wm8804_dapm_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(wm8804_dapm_widgets),
+	.dapm_routes = wm8804_dapm_routes,
+	.num_dapm_routes = ARRAY_SIZE(wm8804_dapm_routes),
 };
 
 static const struct of_device_id wm8804_of_match[] = {
