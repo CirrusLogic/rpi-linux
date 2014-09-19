@@ -3071,9 +3071,9 @@ int snd_soc_put_volsw_range(struct snd_kcontrol *kcontrol,
 	int ret;
 
 	if (invert)
-		val = ((max - ucontrol->value.integer.value[0] + min) & mask);
+		val = (max - ucontrol->value.integer.value[0]) & mask;
 	else
-		val = (ucontrol->value.integer.value[0] & mask);
+		val = ((ucontrol->value.integer.value[0] + min) & mask);
 	val_mask = mask << shift;
 	val = val << shift;
 
@@ -3083,9 +3083,9 @@ int snd_soc_put_volsw_range(struct snd_kcontrol *kcontrol,
 
 	if (snd_soc_volsw_is_stereo(mc)) {
 		if (invert)
-			val = ((max - ucontrol->value.integer.value[1] + min) & mask);
+			val = (max - ucontrol->value.integer.value[1]) & mask;
 		else
-			val = (ucontrol->value.integer.value[1] & mask);
+			val = ((ucontrol->value.integer.value[1] + min) & mask);
 		val_mask = mask << shift;
 		val = val << shift;
 
@@ -3123,14 +3123,20 @@ int snd_soc_get_volsw_range(struct snd_kcontrol *kcontrol,
 		(snd_soc_read(codec, reg) >> shift) & mask;
 	if (invert)
 		ucontrol->value.integer.value[0] =
-			max - ucontrol->value.integer.value[0] + min;
+			max - ucontrol->value.integer.value[0];
+	else
+		ucontrol->value.integer.value[0] =
+			ucontrol->value.integer.value[0] - min;
 
 	if (snd_soc_volsw_is_stereo(mc)) {
 		ucontrol->value.integer.value[1] =
 			(snd_soc_read(codec, rreg) >> shift) & mask;
 		if (invert)
 			ucontrol->value.integer.value[1] =
-				max - ucontrol->value.integer.value[1] + min;
+				max - ucontrol->value.integer.value[1];
+		else
+			ucontrol->value.integer.value[1] =
+				ucontrol->value.integer.value[1] - min;
 	}
 
 	return 0;
