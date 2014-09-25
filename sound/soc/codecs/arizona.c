@@ -1107,6 +1107,28 @@ static int arizona_hw_params_rate(struct snd_pcm_substream *substream,
 	return 0;
 }
 
+static bool arizona_aif_cfg_changed(struct snd_soc_codec *codec,
+	                                 int base, int bclk, int lrclk, int frame)
+{
+	int val;
+
+	val = snd_soc_read(codec, base + ARIZONA_AIF_BCLK_CTRL);
+	if (bclk != (val & ARIZONA_AIF1_BCLK_FREQ_MASK))
+		return true;
+
+	val = snd_soc_read(codec, base + ARIZONA_AIF_TX_BCLK_RATE);
+	if (lrclk != (val & ARIZONA_AIF1TX_BCPF_MASK))
+		return true;
+
+	val = snd_soc_read(codec, base + ARIZONA_AIF_FRAME_CTRL_1);
+	if (frame != (val & (ARIZONA_AIF1TX_WL_MASK |
+				ARIZONA_AIF1TX_SLOT_LEN_MASK)))
+		return true;
+
+	return false;
+}
+
+
 static int arizona_hw_params(struct snd_pcm_substream *substream,
 			     struct snd_pcm_hw_params *params,
 			     struct snd_soc_dai *dai)
@@ -1119,6 +1141,9 @@ static int arizona_hw_params(struct snd_pcm_substream *substream,
 	int i, ret, val;
 	int chan_limit = arizona->pdata.max_channels_clocked[dai->id - 1];
 	int bclk, lrclk, wl, frame, bclk_target;
+	bool reconfig;
+	unsigned int aif_tx_state, aif_rx_state;
+
 
 	if (params_rate(params) % 8000)
 		rates = &arizona_44k1_bclk_rates[0];
@@ -1160,24 +1185,53 @@ static int arizona_hw_params(struct snd_pcm_substream *substream,
 	wl = snd_pcm_format_width(params_format(params));
 	frame = wl << ARIZONA_AIF1TX_WL_SHIFT | wl;
 
+	reconfig = arizona_aif_cfg_changed(codec, base, bclk, lrclk, frame);
+
+	if (reconfig) {
+		/* Save AIF TX/RX state */
+		aif_tx_state = snd_soc_read(codec,
+                                            base + ARIZONA_AIF_TX_ENABLES);
+                aif_rx_state = snd_soc_read(codec,
+                                            base + ARIZONA_AIF_RX_ENABLES);
+                /* Disable AIF TX/RX before reconfiguring it */
+                regmap_update_bits(arizona->regmap,
+                                    base + ARIZONA_AIF_TX_ENABLES, 0xff, 0x0);
+                regmap_update_bits(arizona->regmap,
+                                    base + ARIZONA_AIF_RX_ENABLES, 0xff, 0x0);
+        }
+
 	ret = arizona_hw_params_rate(substream, params, dai);
 	if (ret != 0)
-		return ret;
+		goto restore_aif;
+
+	if (reconfig) {
 
 	snd_soc_update_bits(codec, base + ARIZONA_AIF_BCLK_CTRL,
-			    ARIZONA_AIF1_BCLK_FREQ_MASK, bclk);
-	snd_soc_update_bits(codec, base + ARIZONA_AIF_TX_BCLK_RATE,
-			    ARIZONA_AIF1TX_BCPF_MASK, lrclk);
-	snd_soc_update_bits(codec, base + ARIZONA_AIF_RX_BCLK_RATE,
-			    ARIZONA_AIF1RX_BCPF_MASK, lrclk);
-	snd_soc_update_bits(codec, base + ARIZONA_AIF_FRAME_CTRL_1,
-			    ARIZONA_AIF1TX_WL_MASK |
-			    ARIZONA_AIF1TX_SLOT_LEN_MASK, frame);
-	snd_soc_update_bits(codec, base + ARIZONA_AIF_FRAME_CTRL_2,
-			    ARIZONA_AIF1RX_WL_MASK |
-			    ARIZONA_AIF1RX_SLOT_LEN_MASK, frame);
+                            ARIZONA_AIF1_BCLK_FREQ_MASK, bclk);
+        snd_soc_update_bits(codec, base + ARIZONA_AIF_TX_BCLK_RATE,
+                            ARIZONA_AIF1TX_BCPF_MASK, lrclk);
+        snd_soc_update_bits(codec, base + ARIZONA_AIF_RX_BCLK_RATE,
+                            ARIZONA_AIF1RX_BCPF_MASK, lrclk);
+        snd_soc_update_bits(codec, base + ARIZONA_AIF_FRAME_CTRL_1,
+                            ARIZONA_AIF1TX_WL_MASK |
+                            ARIZONA_AIF1TX_SLOT_LEN_MASK, frame);
+        snd_soc_update_bits(codec, base + ARIZONA_AIF_FRAME_CTRL_2,
+                            ARIZONA_AIF1RX_WL_MASK |
+                            ARIZONA_AIF1RX_SLOT_LEN_MASK, frame);
 
-	return 0;
+       }
+
+restore_aif:
+        if (reconfig) {
+                /* Restore AIF TX/RX state */
+                regmap_update_bits(arizona->regmap,
+                                         base + ARIZONA_AIF_TX_ENABLES,
+                                         0xff, aif_tx_state);
+                regmap_update_bits(arizona->regmap,
+                                   base + ARIZONA_AIF_RX_ENABLES,
+                                   0xff, aif_rx_state);
+        }
+        return ret;
 }
 
 static const char *arizona_dai_clk_str(int clk_id)
