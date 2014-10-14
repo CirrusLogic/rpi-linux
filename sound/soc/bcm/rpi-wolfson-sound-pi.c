@@ -31,6 +31,8 @@
 #include "../codecs/wm5102.h"
 #include "../codecs/wm8804.h"
 
+#include <asm/system_info.h>
+
 #define WM8804_CLKOUT_HZ 12000000
 #define RPI_WSP_DEFAULT_MCLK2 24000000
 
@@ -38,7 +40,8 @@
 #define GPIO_WM8804_RST 8
 #define GPIO_WM8804_MODE 2
 #define GPIO_WM8804_SW_MODE 23
-#define GPIO_WM8804_I2C_ADDR 18
+#define GPIO_WM8804_I2C_ADDR_B 18
+#define GPIO_WM8804_I2C_ADDR_B_PLUS 13
 #define RPI_WLF_SR 44100
 #define WM5102_MAX_SYSCLK_1 49152000 /*max sysclk for 4K family*/
 #define WM5102_MAX_SYSCLK_2 45158400 /*max sysclk for 11.025K family*/
@@ -207,6 +210,7 @@ static const struct snd_kcontrol_new rpi_wsp_controls[] = {
 	SOC_DAPM_PIN_SWITCH("Headset Mic"),
 	SOC_DAPM_PIN_SWITCH("SPDIF out"),
 	SOC_DAPM_PIN_SWITCH("SPDIF in"),
+	SOC_DAPM_PIN_SWITCH("Line Input"),
 };
 
 const struct snd_soc_dapm_widget rpi_wsp_dapm_widgets[] = {
@@ -229,7 +233,7 @@ const struct snd_soc_dapm_route rpi_wsp_dapm_routes[] = {
 
 	{ "IN3L", NULL, "Line Input" },
 	{ "IN3R", NULL, "Line Input" },
-	{ "Line Input", NULL, "MICVDD" },
+	{ "Line Input", NULL, "MICBIAS3" },
 
 	{ "SPDIF out", NULL, "Playback" },
 	{ "Capture", NULL, "SPDIF in" },
@@ -322,6 +326,14 @@ static void bcm2708_set_gpio_alt(int pin, int alt)
 static int wm8804_reset(void)
  {
 	int ret;
+	unsigned int gpio_wm8804_i2c_addr;
+
+	if ((system_rev & 0xffffff) >= 0x10) {
+		/* Model B+ or later */
+		gpio_wm8804_i2c_addr = GPIO_WM8804_I2C_ADDR_B_PLUS;
+	} else {
+		gpio_wm8804_i2c_addr = GPIO_WM8804_I2C_ADDR_B;
+	}
 
 	if (!gpio_is_valid(GPIO_WM8804_RST)) {
 		pr_err("Skipping unavailable gpio %d (%s)\n", GPIO_WM8804_RST, "wm8804_rst");
@@ -338,8 +350,8 @@ static int wm8804_reset(void)
 		return -ENOMEM;
 	}
 
-	if (!gpio_is_valid(GPIO_WM8804_I2C_ADDR)) {
-		pr_err("Skipping unavailable gpio %d (%s)\n", GPIO_WM8804_I2C_ADDR, "wm8804_i2c_addr");
+	if (!gpio_is_valid(gpio_wm8804_i2c_addr)) {
+		pr_err("Skipping unavailable gpio %d (%s)\n", gpio_wm8804_i2c_addr, "wm8804_i2c_addr");
 		return -ENOMEM;
 	}
 
@@ -365,7 +377,7 @@ static int wm8804_reset(void)
 		return ret;
 	}
 
-	ret = gpio_request(GPIO_WM8804_I2C_ADDR, "wm8804_i2c_addr");
+	ret = gpio_request(gpio_wm8804_i2c_addr, "wm8804_i2c_addr");
 	if (ret < 0) {
 		pr_err("gpio_request wm8804_i2c_addr failed\n");
 		return ret;
@@ -384,7 +396,7 @@ static int wm8804_reset(void)
 	}
 
 	/*Set 2 Wire (I2C) Addr to 0x3A, writing 1 will make the Addr as 0x3B*/
-	ret = gpio_direction_output(GPIO_WM8804_I2C_ADDR, 0);
+	ret = gpio_direction_output(gpio_wm8804_i2c_addr, 0);
 	if (ret < 0) {
 		pr_err("gpio_direction_output wm8804_i2c_addr failed\n");
 	}
@@ -405,7 +417,7 @@ static int wm8804_reset(void)
 	gpio_free(GPIO_WM8804_RST);
 	gpio_free(GPIO_WM8804_MODE);
 	gpio_free(GPIO_WM8804_SW_MODE);
-	gpio_free(GPIO_WM8804_I2C_ADDR);
+	gpio_free(gpio_wm8804_i2c_addr);
 
 	/*GPIO2 is used for SW/HW Mode Select and after Reset the same pin is used as
 	I2C data line, so after reset  it is configured as I2C data line i.e ALT0 function*/
