@@ -609,13 +609,16 @@ static struct spi_board_info bcm2708_spi_devices[] = {
 		.bus_num = 0,
 		.chip_select = 0,
 		.mode = SPI_MODE_0,
-	}, {
+	},
+#if !defined (CONFIG_SND_BCM2708_SOC_RPI_CODEC_WSP_MODULE) && !defined (CONFIG_SND_BCM2708_SOC_RPI_CODEC_WSP)
+	{
 		.modalias = "spidev",
 		.max_speed_hz = 500000,
 		.bus_num = 0,
 		.chip_select = 1,
 		.mode = SPI_MODE_0,
 	}
+#endif
 #endif
 };
 #endif
