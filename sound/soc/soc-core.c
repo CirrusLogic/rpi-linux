@@ -3038,8 +3038,8 @@ int snd_soc_info_volsw_range(struct snd_kcontrol *kcontrol,
 
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
 	uinfo->count = snd_soc_volsw_is_stereo(mc) ? 2 : 1;
-	uinfo->value.integer.min = min;
-	uinfo->value.integer.max = platform_max;
+	uinfo->value.integer.min = 0;
+	uinfo->value.integer.max = platform_max - min;
 
 	return 0;
 }
