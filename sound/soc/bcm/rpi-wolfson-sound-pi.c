@@ -52,9 +52,8 @@ struct wm5102_machine_priv {
 	void __iomem *gpio_base;
 	void __iomem *gpctl_base;
 	struct snd_soc_codec *codec;
-	struct snd_soc_dai *aif[3];
-	int aif1rate;
 	int wm8804_sr;
+	int sync_path_enable;
 };
 
 /* Output clock from GPIO_GCLK(GPIO4) */
@@ -205,6 +204,53 @@ static void enable_gclk_clock(bool enable)
 	}
 }
 
+int spdif_rx_enable_event(struct snd_soc_dapm_widget *w,
+			struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_card *card = &snd_rpi_wsp;
+	struct wm5102_machine_priv *priv = snd_soc_card_get_drvdata(card);
+	struct snd_soc_codec *wm5102_codec = card->rtd[0].codec;
+	int ret = 0;
+	int sr_mult;
+	int sr = priv->wm8804_sr;
+
+	switch (event) {
+	case SND_SOC_DAPM_POST_PMU:
+		/* Enable sync path in case of SPDIF capture use case */
+		sr_mult = (sr % 4000 == 0) ? (WM5102_MAX_SYSCLK_1/sr) : (WM5102_MAX_SYSCLK_2/sr);
+
+		/*reset FLL1*/
+		snd_soc_codec_set_pll(wm5102_codec, WM5102_FLL1_REFCLK,
+					ARIZONA_FLL_SRC_NONE, 0, 0);
+		snd_soc_codec_set_pll(wm5102_codec, WM5102_FLL1,
+					ARIZONA_FLL_SRC_NONE, 0, 0);
+
+		ret = snd_soc_codec_set_pll(wm5102_codec, WM5102_FLL1_REFCLK,
+					    ARIZONA_CLK_SRC_MCLK1,
+					    WM8804_CLKOUT_HZ,
+					    sr * sr_mult);
+		if (ret != 0) {
+			dev_err(wm5102_codec->dev, "Failed to enable FLL1 with Ref Clock Loop: %d\n", ret);
+			return ret;
+		}
+
+		ret = snd_soc_codec_set_pll(wm5102_codec, WM5102_FLL1,
+					    ARIZONA_CLK_SRC_AIF2BCLK,
+					    sr * 64, sr * sr_mult);
+		if (ret != 0) {
+			dev_err(wm5102_codec->dev, "Failed to enable FLL1  Sync Clock Loop: %d\n", ret);
+			return ret;
+		}
+		priv->sync_path_enable = 1;
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		priv->sync_path_enable = 0;
+		break;
+	}
+
+	return ret;
+}
+
 static const struct snd_kcontrol_new rpi_wsp_controls[] = {
 	SOC_DAPM_PIN_SWITCH("DMIC"),
 	SOC_DAPM_PIN_SWITCH("Headset Mic"),
@@ -217,6 +263,10 @@ const struct snd_soc_dapm_widget rpi_wsp_dapm_widgets[] = {
 	SND_SOC_DAPM_MIC("DMIC", NULL),
 	SND_SOC_DAPM_MIC("Headset Mic", NULL),
 	SND_SOC_DAPM_MIC("Line Input", NULL),
+	SND_SOC_DAPM_INPUT("dummy SPDIF in"),
+	SND_SOC_DAPM_PGA_E("dummy SPDIFRX", SND_SOC_NOPM, 0, 0,NULL, 0,
+			spdif_rx_enable_event,
+			SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
 };
 
 const struct snd_soc_dapm_route rpi_wsp_dapm_routes[] = {
@@ -234,53 +284,12 @@ const struct snd_soc_dapm_route rpi_wsp_dapm_routes[] = {
 
 	{ "SYSCLK", NULL, "OPCLK" },
 	{ "ASYNCCLK", NULL, "ASYNCOPCLK" },
+
+	/* Dummy routes to check whether SPDIF RX is enabled or not */
+	{"dummy SPDIFRX", NULL, "dummy SPDIF in"},
+	{"AIFTX", NULL, "dummy SPDIFRX"},
 };
-static int rpi_set_bias_level(struct snd_soc_card *card,
-				struct snd_soc_dapm_context *dapm,
-				enum snd_soc_bias_level level)
-{
-	struct snd_soc_codec *wm8804_codec = card->rtd[1].codec;
 
-	switch (level) {
-	case SND_SOC_BIAS_STANDBY:
-		if (dapm->bias_level != SND_SOC_BIAS_OFF)
-			break;
-
-		snd_soc_update_bits(wm8804_codec, WM8804_PWRDN, 0x8, 0x0);
-		break;
-	case SND_SOC_BIAS_PREPARE:
-		if (dapm->bias_level != SND_SOC_BIAS_STANDBY)
-			break;
-
-		snd_soc_update_bits(wm8804_codec, WM8804_PWRDN, 0x1, 0x0);
-		break;
-	default:
-		break;
-	}
-
-	return 0;
-}
-static int rpi_set_bias_level_post(struct snd_soc_card *card,
-		struct snd_soc_dapm_context *dapm,
-		enum snd_soc_bias_level level)
-{
-	struct snd_soc_codec *wm8804_codec = card->rtd[1].codec;
-
-	switch (level) {
-	case SND_SOC_BIAS_OFF:
-		snd_soc_update_bits(wm8804_codec, WM8804_PWRDN, 0x8, 0x8);
-		break;
-	case SND_SOC_BIAS_STANDBY:
-		snd_soc_update_bits(wm8804_codec, WM8804_PWRDN, 0x1, 0x1);
-		break;
-	default:
-		break;
-	}
-
-	dapm->bias_level = level;
-
-	return 0;
-}
 static void bcm2708_set_gpio_out(int pin)
 {
 	/*
@@ -460,6 +469,7 @@ static int snd_rpi_wsp_config_5102_clks(struct snd_soc_codec *wm5102_codec, int 
 		}
 	}
 
+
 	ret = snd_soc_codec_set_sysclk(wm5102_codec,
 			ARIZONA_CLK_SYSCLK,
 			ARIZONA_CLK_SRC_FLL1,
@@ -520,34 +530,6 @@ static int snd_rpi_wsp_config_8804_clks(struct snd_soc_codec *wm8804_codec,
 	return 0;
 }
 
-static int snd_rpi_wsp_config_clks(struct snd_soc_codec *wm8804_codec,
-		struct snd_soc_codec *wm5102_codec, struct snd_soc_dai *wm8804_dai,
-		int sr, bool enable_fllsync,int wm8804_rxtx_status)
-{
-	int ret=0,rx_disabled,tx_disabled;
-
-	rx_disabled = wm8804_rxtx_status & 0x2;
-	tx_disabled = wm8804_rxtx_status & 0x4;
-
-	if(!rx_disabled || !tx_disabled){
-		ret = snd_rpi_wsp_config_8804_clks(wm8804_codec, wm8804_dai,sr);
-
-		if (ret != 0) {
-			dev_err(wm8804_codec->dev, "snd_rpi_wsp_config_8804_clks failed: %d\n", ret);
-		return ret;
-		}
-
-	}
-
-	ret = snd_rpi_wsp_config_5102_clks(wm5102_codec,  sr, enable_fllsync);
-	if (ret != 0) {
-		dev_err(wm5102_codec->dev, "snd_rpi_wsp_config_5102_clks failed: %d\n", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
 static int snd_rpi_wsp_hw_params(struct snd_pcm_substream *substream,
 				 struct snd_pcm_hw_params *params)
 {
@@ -558,7 +540,7 @@ static int snd_rpi_wsp_hw_params(struct snd_pcm_substream *substream,
 	struct snd_soc_codec *wm8804_codec = card->rtd[1].codec;
 	struct snd_soc_dai *wm8804_codec_dai = card->rtd[1].codec_dai;
 	struct wm5102_machine_priv *priv = snd_soc_card_get_drvdata(card);
-	int ret, rxtx_status,rx_disabled,capture_stream_opened;
+	int ret, capture_stream_opened;
 	bool enable_fllsync;
 	unsigned int bclkratio;
 
@@ -571,23 +553,31 @@ static int snd_rpi_wsp_hw_params(struct snd_pcm_substream *substream,
 		}
 	}
 
-	rxtx_status = snd_soc_read(wm8804_codec, WM8804_PWRDN);
-	rx_disabled = rxtx_status & 0x2;
+	if(params_rate(params) >= 32000)
+	{
+		ret = snd_rpi_wsp_config_8804_clks(wm8804_codec, wm8804_codec_dai,
+						params_rate(params));
+
+		if (ret != 0) {
+			dev_err(wm8804_codec->dev, "snd_rpi_wsp_config_8804_clks failed: %d\n",
+				ret);
+			return ret;
+		}
+	}
 
 	capture_stream_opened =
 		substream->pcm->streams[SNDRV_PCM_STREAM_CAPTURE].substream_opened;
 
-	if (capture_stream_opened &&  !rx_disabled)
+	if (capture_stream_opened &&  priv->sync_path_enable)
 		enable_fllsync = true;
 	else
 		enable_fllsync = false;
 
-
-	ret = snd_rpi_wsp_config_clks(wm8804_codec, wm5102_codec,
-					  wm8804_codec_dai,
-					  params_rate(params),
-					  enable_fllsync,
-					  rxtx_status);
+	ret = snd_rpi_wsp_config_5102_clks(wm5102_codec,  params_rate(params), enable_fllsync);
+	if (ret != 0) {
+		dev_err(wm5102_codec->dev, "snd_rpi_wsp_config_5102_clks failed: %d\n", ret);
+		return ret;
+	}
 
 	priv->wm8804_sr =  params_rate(params);
 
@@ -683,13 +673,11 @@ static int snd_rpi_wsp_late_probe(struct snd_soc_card *card)
 {
 	struct snd_soc_codec *codec = card->rtd[0].codec;
 	struct wm5102_machine_priv *priv = snd_soc_card_get_drvdata(codec->card);
-	int i, ret;
+	int ret;
 
 	priv->codec = codec;
 	priv->wm8804_sr = RPI_WLF_SR;
-
-	for (i = 0; i < ARRAY_SIZE(snd_rpi_wsp_dai); i++)
-		priv->aif[i] = card->rtd[i].codec_dai;
+	priv->sync_path_enable = 0;
 
 	ret = snd_soc_codec_set_sysclk(card->rtd[0].codec, ARIZONA_CLK_SYSCLK, ARIZONA_CLK_SRC_FLL1,
 					0, SND_SOC_CLOCK_IN);
@@ -717,14 +705,6 @@ static int snd_rpi_wsp_late_probe(struct snd_soc_card *card)
 		return ret;
 	}
 
-	/*Configure SAMPLE_RATE_1 and ASYNC_SAMPLE_RATE_1 by default to
-	44.1KHz these values can be changed in runtime by corresponding
-	DAI hw_params callback */
-	snd_soc_update_bits(card->rtd[0].codec, ARIZONA_SAMPLE_RATE_1,
-		ARIZONA_SAMPLE_RATE_1_MASK, 0x0B);
-	snd_soc_update_bits(card->rtd[0].codec, ARIZONA_ASYNC_SAMPLE_RATE_1,
-		ARIZONA_ASYNC_SAMPLE_RATE_MASK, 0x0B);
-
 	return 0;
 }
 
@@ -740,8 +720,6 @@ static struct snd_soc_card snd_rpi_wsp = {
 	.num_dapm_widgets = ARRAY_SIZE(rpi_wsp_dapm_widgets),
 	.dapm_routes = rpi_wsp_dapm_routes,
 	.num_dapm_routes = ARRAY_SIZE(rpi_wsp_dapm_routes),
-	.set_bias_level = rpi_set_bias_level,
-	.set_bias_level_post = rpi_set_bias_level_post,
 };
 
 static int snd_rpi_wsp_probe(struct platform_device *pdev)
